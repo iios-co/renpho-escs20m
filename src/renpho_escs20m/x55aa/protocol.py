@@ -296,6 +296,28 @@ CMD_MSC_WEIGHT = 0x21
 CMD_MSC_FINAL = 0x24
 CMD_MSC_PANEL = 0x25
 
+# MSC housekeeping frames the scale emits that carry no measurement this
+# library reports. Recognised so they log cleanly rather than as
+# "unrecognized", but deliberately not parsed into fields:
+#   0x20 — session/progress status. Payload `<step> <XX> 01 00 46`, the step
+#          byte cycling 00,02,03,04,05,06 across a weigh-in; no weight or
+#          impedance, and its bytes match none of the app's displayed metrics
+#          (the reading is delivered in full by 0x24 + 0x25).
+#   0x22/0x23/0x27/0x28 — acks to the 0xb2/0xb3/0xb8/0xb7 handshake writes;
+#          they echo the handshake sequence byte and nothing else.
+CMD_MSC_SESSION_STATUS = 0x20
+CMD_MSC_ACK_HEIGHT_WEIGHT = 0x22
+CMD_MSC_ACK_CONFIG = 0x23
+CMD_MSC_ACK_LABEL = 0x27
+CMD_MSC_ACK_PROFILE = 0x28
+MSC_HOUSEKEEPING_COMMANDS: tuple[int, ...] = (
+    CMD_MSC_SESSION_STATUS,
+    CMD_MSC_ACK_HEIGHT_WEIGHT,
+    CMD_MSC_ACK_CONFIG,
+    CMD_MSC_ACK_LABEL,
+    CMD_MSC_ACK_PROFILE,
+)
+
 CMD_SET_DISPLAY_UNIT = 0x90
 # 0x95 — one ack clears the scale's entire offline store; opt-in only.
 # 0x96 — a registered slot persists a user on the scale; only the guest

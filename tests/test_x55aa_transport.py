@@ -686,3 +686,27 @@ async def test_msc_missing_indicate_char_warns(caplog):
     with caplog.at_level(logging.WARNING):
         await _run_msc_session_setup(scale, client)
     assert "indicate characteristic (2A12) not found" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_msc_housekeeping_frames_are_recognized_not_unrecognized(caplog):
+    """0x20 session status and the 0x22/0x23/0x27/0x28 handshake acks log as
+    housekeeping, never as 'unrecognized', and fire no callback."""
+    scale, callback = _make_msc_scale()
+    client = _make_msc_client()
+    await _run_msc_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    housekeeping = [
+        bytes.fromhex("55aa220002000225"),  # 0xb2 ack
+        bytes.fromhex("55aa2300030107012e"),  # 0xb3 ack
+        bytes.fromhex("55aa28000202012c"),  # 0xb8 ack
+        bytes.fromhex("55aa27000203012c"),  # 0xb7 ack
+        bytes.fromhex("55aa20000500010100466c"),  # session status
+    ]
+    with caplog.at_level(logging.DEBUG):
+        _feed(scale, *housekeeping)
+
+    assert "unrecognized" not in caplog.text
+    assert "housekeeping" in caplog.text
+    assert callback.call_count == 0

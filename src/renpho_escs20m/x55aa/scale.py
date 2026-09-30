@@ -53,6 +53,7 @@ from .protocol import (
     CMD_MSC_PANEL,
     CMD_MSC_WEIGHT,
     CMD_PROFILE_ACK,
+    MSC_HOUSEKEEPING_COMMANDS,
     CMD_SETTINGS_ACK,
     CMD_STATUS,
     CMD_STATUS_ALT,
@@ -650,12 +651,8 @@ class Renpho55AAScale(GattScale):
         address: str,
     ) -> None:
         self._logger.debug("0x55aa RX payload from %s: %s", address, payload.hex())
-        # Raw notifications, so an extended unit's fragment headers show.
+        # Raw notifications, so a fragmented frame's headers show.
         self._trace_frame("rx", payload)
-        # The extended flavor splits a frame longer than one notification into
-        # chunks behind a 3-byte header; a plain frame starts with the magic
-        # and passes through untouched. The basic flavor has no frame long
-        # enough to fragment, so its bytes are never inspected for a header.
         # The extended and MSC flavors both split a frame longer than one
         # notification into chunks behind a 3-byte header; a plain frame starts
         # with the magic and passes through untouched. The basic flavor has no
@@ -690,6 +687,16 @@ class Renpho55AAScale(GattScale):
             ):
                 self._logger.debug(
                     "0x55aa frame 0x%02x from %s: %s",
+                    frame.cmd,
+                    address,
+                    frame.payload.hex(),
+                )
+            elif frame.cmd in MSC_HOUSEKEEPING_COMMANDS:
+                # MSC session-status (0x20) and handshake acks (0x22/0x23/
+                # 0x27/0x28): recognised, but carry no measurement this library
+                # reports. Logged as housekeeping rather than "unrecognized".
+                self._logger.debug(
+                    "0x55aa (MSC) housekeeping frame 0x%02x from %s: %s",
                     frame.cmd,
                     address,
                     frame.payload.hex(),
