@@ -238,3 +238,37 @@ def test_assert_allowed_write_rejects_a_mutated_profile() -> None:
     frame = body + bytes([checksum(body)])
     with pytest.raises(ForbiddenWrite):
         assert_allowed_write(frame)
+
+
+# --- advertisement detection (00 12 prefix) ---------------------------------
+
+# Real R-MSC04 advertisement (company 0x1A10 payload), MAC 60:30:F2:73:CC:79.
+_MSC_ADV = bytes.fromhex("001200356030f273cc790002")
+_MSC_MAC = "60:30:F2:73:CC:79"
+
+
+def test_is_msc_advertisement_matches_the_00_12_prefix() -> None:
+    from renpho_escs20m.x55aa.protocol import is_advertisement, is_msc_advertisement
+
+    assert is_msc_advertisement(_MSC_ADV, _MSC_MAC) is True
+    # It is NOT the standard 00 04 shape.
+    assert is_advertisement(_MSC_ADV, _MSC_MAC) is False
+
+
+def test_is_msc_advertisement_requires_the_mac_echo() -> None:
+    from renpho_escs20m.x55aa.protocol import is_msc_advertisement
+
+    assert is_msc_advertisement(_MSC_ADV, "AA:BB:CC:DD:EE:FF") is False
+
+
+def test_detect_protocol_classifies_msc_advertisement_as_x55aa() -> None:
+    from renpho_escs20m.detection import ScaleProtocol, detect_protocol, is_x55aa_frame
+
+    assert is_x55aa_frame(_MSC_ADV, _MSC_MAC) is True
+    assert detect_protocol("", {0x1A10: _MSC_ADV}, _MSC_MAC) == ScaleProtocol.X55AA
+
+
+def test_detect_protocol_rejects_msc_advertisement_with_wrong_mac() -> None:
+    from renpho_escs20m.detection import detect_protocol
+
+    assert detect_protocol("", {0x1A10: _MSC_ADV}, "AA:BB:CC:DD:EE:FF") is None

@@ -105,6 +105,12 @@ MANUFACTURER_ID = 0x1A10
 SUPPORTED_COMPANY_IDS = frozenset([MANUFACTURER_ID])
 
 ADV_PREFIX = b"\x00\x04"
+# The MSC flavor (R-MSC04) advertises the same company id (0x1A10) and the
+# same MAC echo at [4:10], but with a different 2-byte prefix (00 12 seen on
+# the R-MSC04) and a different value at [2:4] (0x0035 observed). The MAC echo
+# is what makes either shape safe to trust on the catch-all company id, so the
+# prefix is treated as a family marker rather than a strict constant.
+ADV_PREFIX_MSC = b"\x00\x12"
 ADV_MODEL_SLICE = slice(2, 4)  # model identifier, 16-bit big-endian
 ADV_MAC_SLICE = slice(4, 10)
 _MIN_ADV_LEN = ADV_MAC_SLICE.stop
@@ -819,6 +825,25 @@ def _assert_allowed_msc_write(cmd: int, payload: bytes) -> None:
         )
 
 
+def _adv_mac_echo_ok(payload: bytes, address: str | None) -> bool:
+    """Validate the forward-order MAC echo at bytes 4-10 against ``address``.
+
+    A non-MAC address (e.g. a macOS CoreBluetooth UUID) doesn't split into
+    six octets and skips the echo check entirely; a six-part address that
+    isn't valid hex is likewise accepted unchecked.
+    """
+    if not address:
+        return True
+    octets = address.split(":")
+    if len(octets) != 6:
+        return True
+    try:
+        mac = bytes(int(o, 16) for o in octets)
+    except ValueError:
+        return True
+    return payload[ADV_MAC_SLICE] == mac
+
+
 def is_advertisement(payload: bytes, address: str | None = None) -> bool:
     """Return True if ``payload`` has the 0x55aa advertisement shape.
 
@@ -827,18 +852,21 @@ def is_advertisement(payload: bytes, address: str | None = None) -> bool:
     """
     if len(payload) < _MIN_ADV_LEN or not payload.startswith(ADV_PREFIX):
         return False
-    if address:
-        # A non-MAC address (e.g. a macOS CoreBluetooth UUID) doesn't split
-        # into six octets and skips the echo check entirely; a six-part
-        # address that isn't valid hex is likewise accepted unchecked.
-        octets = address.split(":")
-        if len(octets) == 6:
-            try:
-                mac = bytes(int(o, 16) for o in octets)
-            except ValueError:
-                return True
-            return payload[ADV_MAC_SLICE] == mac
-    return True
+    return _adv_mac_echo_ok(payload, address)
+
+
+def is_msc_advertisement(payload: bytes, address: str | None = None) -> bool:
+    """Return True if ``payload`` is an MSC-flavor (R-MSC04) advertisement.
+
+    The MSC frame shares the 0x1A10 company id and the MAC echo at bytes
+    4-10 with the standard 0x55aa advertisement, but carries a different
+    2-byte prefix (``00 12`` on the R-MSC04). The MAC echo is what makes it
+    safe to trust on the catch-all company id; when ``address`` is a real
+    MAC, that echo must match.
+    """
+    if len(payload) < _MIN_ADV_LEN or not payload.startswith(ADV_PREFIX_MSC):
+        return False
+    return _adv_mac_echo_ok(payload, address)
 
 
 def parse_model_id(payload: bytes) -> int | None:

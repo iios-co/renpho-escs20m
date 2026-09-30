@@ -43,6 +43,7 @@ from .x55aa.protocol import KNOWN_MODEL_IDS as X55AA_KNOWN_MODEL_IDS
 from .x55aa.protocol import MODEL_LABELS as _X55AA_MODEL_LABELS
 from .x55aa.protocol import SUPPORTED_COMPANY_IDS as X55AA_COMPANY_IDS
 from .x55aa.protocol import is_advertisement as _is_x55aa_advertisement
+from .x55aa.protocol import is_msc_advertisement as _is_msc_advertisement
 from .x55aa.protocol import parse_model_id as _parse_x55aa_model_id
 from .xaabb.protocol import SUPPORTED_COMPANY_IDS as AABB_COMPANY_IDS
 
@@ -109,12 +110,15 @@ def is_qn_frame(payload: bytes, address: str | None = None) -> bool:
 
 
 def is_x55aa_frame(payload: bytes, address: str | None = None) -> bool:
-    """Return True if ``payload`` has the 0x55aa advertisement shape.
+    """Return True if ``payload`` has a 0x55aa-family advertisement shape.
 
-    When ``address`` is a real MAC, the forward-order echo at bytes 4-10
-    must match it.
+    Covers both the standard ``00 04`` prefix and the MSC-flavor ``00 12``
+    prefix (R-MSC04); when ``address`` is a real MAC, the forward-order echo
+    at bytes 4-10 must match it in either case.
     """
-    return _is_x55aa_advertisement(payload, address)
+    return _is_x55aa_advertisement(payload, address) or _is_msc_advertisement(
+        payload, address
+    )
 
 
 def is_aabb_frame(payload: bytes, address: str | None = None) -> bool:
