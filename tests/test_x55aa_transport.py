@@ -581,6 +581,15 @@ def _make_msc_scale() -> tuple[Renpho55AAScale, MagicMock]:
     return scale, callback
 
 
+def _make_msc_client() -> MagicMock:
+    """MSC client also exposes the 0x2A12 indicate characteristic."""
+    from renpho_escs20m.const import X55AA_INDICATE_CHARACTERISTIC_UUID
+
+    return _make_client(
+        _ALL_CHARS | frozenset({X55AA_INDICATE_CHARACTERISTIC_UUID})
+    )
+
+
 async def _run_msc_session_setup(scale: Renpho55AAScale, client: MagicMock) -> None:
     scale._client = client
     scale._populate_device_metadata = AsyncMock()
@@ -601,7 +610,7 @@ async def test_msc_session_setup_sends_the_profile_handshake():
     """The four 0xb2/0xb3/0xb8/0xb7 frames must go out, in order, and no
     display-unit command (its form is unverified for this flavor)."""
     scale, _ = _make_msc_scale()
-    client = _make_client()
+    client = _make_msc_client()
     await _run_msc_session_setup(scale, client)
     await asyncio.sleep(0)
 
@@ -622,7 +631,7 @@ async def test_msc_panel_delivers_weight_and_body_fat_once():
     from renpho_escs20m.const import BODY_FAT_KEY
 
     scale, callback = _make_msc_scale()
-    client = _make_client()
+    client = _make_msc_client()
     await _run_msc_session_setup(scale, client)
     await asyncio.sleep(0)
 
@@ -639,7 +648,7 @@ async def test_msc_panel_delivers_weight_and_body_fat_once():
 @pytest.mark.asyncio
 async def test_msc_duplicate_panel_is_ignored():
     scale, callback = _make_msc_scale()
-    client = _make_client()
+    client = _make_msc_client()
     await _run_msc_session_setup(scale, client)
     await asyncio.sleep(0)
 
@@ -647,3 +656,33 @@ async def test_msc_duplicate_panel_is_ignored():
     _feed(scale, *frames)
     _feed(scale, *frames)
     assert callback.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_msc_subscribes_to_both_notify_and_indicate():
+    """MSC must start_notify on 0x2A10 (live weight) AND 0x2A12 (the final
+    0x24/0x25 panel arrives there as an indication)."""
+    from renpho_escs20m.const import (
+        X55AA_INDICATE_CHARACTERISTIC_UUID,
+        X55AA_NOTIFY_CHARACTERISTIC_UUID,
+    )
+
+    scale, _ = _make_msc_scale()
+    client = _make_msc_client()
+    await _run_msc_session_setup(scale, client)
+
+    subscribed = {
+        call.args[0] for call in client.start_notify.await_args_list
+    }
+    assert client.chars[X55AA_NOTIFY_CHARACTERISTIC_UUID] in subscribed
+    assert client.chars[X55AA_INDICATE_CHARACTERISTIC_UUID] in subscribed
+
+
+@pytest.mark.asyncio
+async def test_msc_missing_indicate_char_warns(caplog):
+    """If 0x2A12 is absent, warn that finals won't arrive (don't crash)."""
+    scale, _ = _make_msc_scale()
+    client = _make_client()  # no indicate characteristic
+    with caplog.at_level(logging.WARNING):
+        await _run_msc_session_setup(scale, client)
+    assert "indicate characteristic (2A12) not found" in caplog.text

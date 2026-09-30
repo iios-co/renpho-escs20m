@@ -20,6 +20,12 @@ FFE0_ALT_COMMAND_CHARACTERISTIC_UUID = "0000ffe4-0000-1000-8000-00805f9b34fb"
 # on-device body composition requires a profile write.
 X55AA_NOTIFY_CHARACTERISTIC_UUID = "00002a10-0000-1000-8000-00805f9b34fb"
 X55AA_COMMAND_CHARACTERISTIC_UUID = "00002a11-0000-1000-8000-00805f9b34fb"
+# MSC flavor (R-MSC04) only: the live-weight stream arrives on 0x2A10 as
+# above, but the command acks and the final 0x24 / 0x25 body-composition
+# panel are delivered as INDICATIONS on a separate characteristic, 0x2A12.
+# A client that subscribes to 0x2A10 alone sees the live weight but never a
+# final, so the MSC path subscribes to both.
+X55AA_INDICATE_CHARACTERISTIC_UUID = "00002a12-0000-1000-8000-00805f9b34fb"
 
 # Standard BLE SIG characteristics on the scale's Device Information services.
 BATTERY_LEVEL_CHARACTERISTIC_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
@@ -59,6 +65,7 @@ __all__ = [
     "FFE0_ALT_COMMAND_CHARACTERISTIC_UUID",
     "X55AA_NOTIFY_CHARACTERISTIC_UUID",
     "X55AA_COMMAND_CHARACTERISTIC_UUID",
+    "X55AA_INDICATE_CHARACTERISTIC_UUID",
     "BATTERY_LEVEL_CHARACTERISTIC_UUID",
     "FIRMWARE_REVISION_CHARACTERISTIC_UUID",
     "WEIGHT_KEY",

@@ -38,6 +38,7 @@ from ..const import (
     RESISTANCE_1_KEY,
     WEIGHT_KEY,
     X55AA_COMMAND_CHARACTERISTIC_UUID,
+    X55AA_INDICATE_CHARACTERISTIC_UUID,
     X55AA_NOTIFY_CHARACTERISTIC_UUID,
 )
 from ..data import BluetoothScanningMode, ScaleData, WeightUnit
@@ -512,6 +513,24 @@ class Renpho55AAScale(GattScale):
             self._notification_handler(c, data, ble_device.name, ble_device.address)
 
         await client.start_notify(char, handler)
+
+        if self._msc:
+            # MSC flavor delivers the live-weight stream on 0x2A10 (above) but
+            # its command acks and the final 0x24 / 0x25 panel arrive as
+            # indications on 0x2A12. Without this second subscription the
+            # client sees live weight but never a final.
+            indicate_char = client.services.get_characteristic(
+                X55AA_INDICATE_CHARACTERISTIC_UUID
+            )
+            if indicate_char is None:
+                self._logger.warning(
+                    "0x55aa (MSC) indicate characteristic (2A12) not found on "
+                    "%s; the scale's final measurement will not be received",
+                    ble_device.address,
+                )
+            else:
+                await client.start_notify(indicate_char, handler)
+
         if self._command_char is not None:
             # Claim this weigh-in's profile write before the prelude runs, not
             # inside it: the prelude is a background task, and a plateau can be
