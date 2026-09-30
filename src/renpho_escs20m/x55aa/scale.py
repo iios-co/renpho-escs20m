@@ -34,6 +34,7 @@ from bleak.backends.scanner import AdvertisementData, BaseBleakScanner
 
 from ..body_metrics import Sex
 from ..const import (
+    BODY_FAT_KEY,
     RESISTANCE_1_KEY,
     WEIGHT_KEY,
     X55AA_COMMAND_CHARACTERISTIC_UUID,
@@ -47,6 +48,9 @@ from .protocol import (
     CMD_EXTENDED_MEASUREMENT,
     CMD_EXTENDED_STORED_RECORD,
     CMD_MEASUREMENT,
+    CMD_MSC_FINAL,
+    CMD_MSC_PANEL,
+    CMD_MSC_WEIGHT,
     CMD_PROFILE_ACK,
     CMD_SETTINGS_ACK,
     CMD_STATUS,
@@ -54,6 +58,7 @@ from .protocol import (
     CMD_STORED_RECORD,
     CMD_USER_PROFILE,
     MANUFACTURER_ID,
+    MSC_PROFILE_RMSC04_RAY,
     SET_TIME_MODEL_IDS,
     ForbiddenWrite,
     Frame,
@@ -64,14 +69,18 @@ from .protocol import (
     build_display_unit_command,
     build_extended_stored_record_ack,
     build_guest_profile_command,
+    build_msc_handshake,
     build_set_time_command,
     is_advertisement,
     is_extended_model,
+    is_msc_model,
     iter_frames,
     parse_model_id,
     parse_extended_measurement,
     parse_extended_stored_record,
     parse_measurement,
+    parse_msc_final_weight,
+    parse_msc_panel,
     parse_status,
     parse_stored_record,
     strip_fragment_header,
@@ -89,6 +98,17 @@ _STORED_RECORD_ACK = bytes.fromhex("55aa950001" "0196")
 _PLACEHOLDER_PROFILE = X55AAProfile(
     sex=Sex.Male, birthday=datetime.date(1985, 7, 1), height_m=1.70
 )
+
+
+def _msc_from_address(address: str | None) -> bool:
+    """True if ``address`` matches a known MSC-flavor MAC prefix.
+
+    Lazy import: ``detection`` imports this package's ``protocol`` module, so
+    importing it at module load would be circular.
+    """
+    from ..detection import is_msc_address
+
+    return is_msc_address(address)
 # For the profile frame's mandatory last-known-weight field when neither the
 # profile nor the session supplies one (connect-time writes). Captured
 # profiles carry the subject's own previous reading, and no effect of this
@@ -240,6 +260,17 @@ class Renpho55AAScale(GattScale):
         self._clear_stored_measurements = clear_stored_measurements
         self._model_id = model_id
         self._extended = is_extended_model(model_id)
+        # MSC flavor (R-MSC04): a third variant that finalises on 0x24/0x25
+        # and needs the 0xb2/0xb3/0xb8/0xb7 handshake. Selected by model id
+        # when one is known, else by MAC prefix (the passive-scanner case);
+        # the address-based fallback is applied when the client is created
+        # for a known MSC address (see _learn_model_id / _msc_from_address).
+        self._msc = is_msc_model(model_id) or _msc_from_address(address)
+        # This weigh-in's handshake sequence counter, incremented per frame
+        # written. The scale's expected starting value at connect is not yet
+        # verified; the app's capture began mid-session, so we start at 0 and
+        # log the exchange for correction if the scale rejects it.
+        self._msc_sequence = 0
         self._fixed_profile: X55AAProfile | None = None
         self._profile_resolver: X55AAProfileResolver | None = None
         if profile is None:
@@ -340,7 +371,9 @@ class Renpho55AAScale(GattScale):
             "model_code": None if model_id is None else f"0x{model_id:04x}",
             "model_label": model_label(ScaleProtocol.X55AA, model_id),
             "flavor": (
-                None
+                "msc"
+                if self._msc
+                else None
                 if model_id is None
                 else ("extended" if self._extended else "basic")
             ),
@@ -439,6 +472,7 @@ class Renpho55AAScale(GattScale):
         self._warned_stored_record_length = False
         self._warned_shutdown_fallback = False
         self._profile_sent = False
+        self._msc_sequence = 0
         self._stable_weight = None
         self._stable_zero_current = False
         self._stable_run = 0
@@ -484,7 +518,12 @@ class Renpho55AAScale(GattScale):
             # detected while it is still awaiting the set-time write. Claiming
             # it here keeps ``_on_stable_weight`` from racing a second, and
             # worse, profile frame onto the wire ahead of the prelude's.
-            self._profile_sent = self._extended and self._profile_resolver is None
+            # MSC always writes its handshake up front in the prelude; the
+            # extended flavor claims the write here only in fixed/weight-only
+            # mode (the resolver races it otherwise).
+            self._profile_sent = self._msc or (
+                self._extended and self._profile_resolver is None
+            )
             self._fire_and_forget(
                 self._send_session_prelude(), name="x55aa-session-prelude"
             )
@@ -541,10 +580,48 @@ class Renpho55AAScale(GattScale):
                     "continuing with the display unit only",
                     self.address,
                 )
+        elif self._msc:
+            # MSC flavor: replay the captured 0xb2/0xb3/0xb8/0xb7 handshake
+            # up front, exactly as the official app does. Without it the scale
+            # streams live weight (0x21) but never releases a final (0x24/0x25).
+            # NOTE: this is a verbatim single-profile capture replay — it
+            # describes one specific user (see build_msc_handshake). The
+            # display unit is NOT sent for MSC: its command form is unverified
+            # for this flavor, and the handshake alone unlocks the reading.
+            try:
+                await self._send_msc_handshake()
+            except Exception:
+                self._logger.exception(
+                    "0x55aa (MSC) could not send the profile handshake for %s; "
+                    "the scale will not release a final measurement",
+                    self.address,
+                )
+            return
         await self._safe_write(
             build_display_unit_command(self.display_unit),
             f"display-unit command ({self.display_unit.value})",
         )
+
+    async def _send_msc_handshake(self) -> None:
+        """Write the MSC profile handshake (verbatim capture replay).
+
+        The four frames carry a per-session sequence byte starting at
+        ``self._msc_sequence``; each write advances it. The scale's expected
+        starting value at connect is unverified, so this is logged frame by
+        frame (via ``_safe_write``) for correction if the scale NAKs.
+        """
+        frames = build_msc_handshake(
+            MSC_PROFILE_RMSC04_RAY, first_sequence=self._msc_sequence
+        )
+        self._msc_sequence = (self._msc_sequence + len(frames)) & 0xFF
+        labels = (
+            "MSC handshake 0xb2 (height/weight)",
+            "MSC handshake 0xb3 (config)",
+            "MSC handshake 0xb8 (profile)",
+            "MSC handshake 0xb7 (label)",
+        )
+        for frame, label in zip(frames, labels):
+            await self._safe_write(frame, label)
 
     def _notification_handler(
         self,
@@ -560,14 +637,26 @@ class Renpho55AAScale(GattScale):
         # chunks behind a 3-byte header; a plain frame starts with the magic
         # and passes through untouched. The basic flavor has no frame long
         # enough to fragment, so its bytes are never inspected for a header.
+        # The extended and MSC flavors both split a frame longer than one
+        # notification into chunks behind a 3-byte header; a plain frame starts
+        # with the magic and passes through untouched. The basic flavor has no
+        # frame long enough to fragment, so its bytes are never inspected.
         raw = bytes(payload)
-        self._buffer.extend(strip_fragment_header(raw) if self._extended else raw)
+        self._buffer.extend(
+            strip_fragment_header(raw) if (self._extended or self._msc) else raw
+        )
 
         for frame in iter_frames(self._buffer):
             if frame.cmd == CMD_MEASUREMENT:
                 self._handle_measurement(frame, name, address)
             elif frame.cmd == CMD_EXTENDED_MEASUREMENT:
                 self._handle_extended_measurement(frame, name, address)
+            elif frame.cmd == CMD_MSC_WEIGHT:
+                self._handle_msc_weight(frame, address)
+            elif frame.cmd == CMD_MSC_FINAL:
+                self._handle_msc_final_weight(frame, address)
+            elif frame.cmd == CMD_MSC_PANEL:
+                self._handle_msc_panel(frame, name, address)
             elif frame.cmd == CMD_STORED_RECORD:
                 self._handle_stored_record(frame, address)
             elif frame.cmd == CMD_EXTENDED_STORED_RECORD:
@@ -641,6 +730,79 @@ class Renpho55AAScale(GattScale):
             measurement.zero_current,
             name,
             address,
+        )
+
+    def _handle_msc_weight(self, frame: Frame, address: str) -> None:
+        """Log an MSC live-weight (0x21) frame; the final comes on 0x24/0x25.
+
+        These stream continuously as the user settles; the reading is only
+        delivered on the panel. A new stream after a final re-arms the
+        weigh-in for a scale that stays connected.
+        """
+        weight = parse_msc_final_weight(
+            Frame(CMD_MSC_FINAL, frame.payload)
+        )  # same [4:6] weight layout
+        if self._final_fired and weight and weight > 0:
+            self._rearm_weigh_in()
+        self._logger.debug(
+            "0x55aa (MSC) live weight from %s: %s",
+            address,
+            f"{weight:.2f} kg" if weight is not None else frame.payload.hex(),
+        )
+
+    def _handle_msc_final_weight(self, frame: Frame, address: str) -> None:
+        """Log the MSC 0x24 final-weight precursor; the panel (0x25) delivers."""
+        weight = parse_msc_final_weight(frame)
+        self._logger.debug(
+            "0x55aa (MSC) final-weight precursor from %s: %s",
+            address,
+            f"{weight:.2f} kg" if weight is not None else frame.payload.hex(),
+        )
+
+    def _handle_msc_panel(self, frame: Frame, name: str | None, address: str) -> None:
+        """Deliver the MSC body-composition panel (0x25) as one reading.
+
+        Reports weight and the scale's own body fat %; the caller derives the
+        remaining metrics from those, as with every other 0x55aa flavor. The
+        panel's BMI, skeletal muscle % and visceral fat are parsed and logged
+        but not reported, matching how the library treats other scales' own
+        derived numbers (the caller's BodyMetrics is the single source).
+        """
+        panel = parse_msc_panel(frame)
+        if panel is None:
+            self._logger.debug(
+                "0x55aa (MSC) short panel frame from %s: %s",
+                address,
+                frame.payload.hex(),
+            )
+            return
+        if self._dedupe_final(panel.weight_kg, 0, address, frame.payload.hex()):
+            return
+        self._final_fired = True
+        self._final_measurement = (panel.weight_kg, 0)
+        self._final_from_fallback = False
+        measurements: dict[str, str | float | None] = {
+            WEIGHT_KEY: panel.weight_kg,
+            BODY_FAT_KEY: panel.body_fat,
+        }
+        self._logger.debug(
+            "0x55aa (MSC) panel from %s: weight=%.2f kg, body_fat=%.1f%% "
+            "(scale-derived bmi=%.1f, skeletal_muscle=%.1f%%, visceral=%d). "
+            "Firing callback.",
+            address,
+            panel.weight_kg,
+            panel.body_fat,
+            panel.bmi,
+            panel.skeletal_muscle,
+            panel.visceral_fat,
+        )
+        self._notification_callback(
+            ScaleData(
+                name=name or "",
+                address=address,
+                display_unit=self.display_unit,
+                measurements=measurements,
+            )
         )
 
     def _warn_unsupported_status(self, frame: Frame, status: int, address: str) -> None:

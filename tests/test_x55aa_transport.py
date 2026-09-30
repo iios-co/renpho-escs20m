@@ -554,3 +554,96 @@ async def test_unavailable_resets_the_session_state():
     _feed(scale, _final(0x01, 7030, 590))
 
     assert callback.call_count == 2
+
+
+# ---- MSC flavor (R-MSC04) --------------------------------------------------
+
+# The R-MSC04's MAC OUI selects the MSC flavor when no model id is relayed
+# (the passive-scanner case). Its captured session 09:58:27 (85.05 kg).
+MSC_ADDRESS = "60:30:F2:73:CC:79"
+
+# The captured handshake for that session (seq starts at 0 here, since the
+# client resets its per-session counter). Built by the library, so the test
+# asserts the four commands go out in order, not exact bytes (covered in
+# test_x55aa_msc.py).
+MSC_PANEL_FRAGMENTS = (
+    "ad04025 5aa25002404110000213 90a00a50df90d".replace(" ", ""),
+    "ae04 01ca0b680bed00630c950c510a290aae0201".replace(" ", ""),
+    "af04 0002010101a60008b0".replace(" ", ""),
+)
+
+
+def _make_msc_scale() -> tuple[Renpho55AAScale, MagicMock]:
+    callback = MagicMock()
+    scale = Renpho55AAScale(
+        MSC_ADDRESS, callback, bleak_scanner_backend=MagicMock()
+    )
+    return scale, callback
+
+
+async def _run_msc_session_setup(scale: Renpho55AAScale, client: MagicMock) -> None:
+    scale._client = client
+    scale._populate_device_metadata = AsyncMock()
+    ble_device = MagicMock(name="ble_device")
+    ble_device.name = "R-MSC04"
+    ble_device.address = MSC_ADDRESS
+    await scale._start_scale_session(ble_device)
+
+
+@pytest.mark.asyncio
+async def test_msc_flavor_selected_by_mac_oui():
+    scale, _ = _make_msc_scale()
+    assert scale._msc is True
+
+
+@pytest.mark.asyncio
+async def test_msc_session_setup_sends_the_profile_handshake():
+    """The four 0xb2/0xb3/0xb8/0xb7 frames must go out, in order, and no
+    display-unit command (its form is unverified for this flavor)."""
+    scale, _ = _make_msc_scale()
+    client = _make_client()
+    await _run_msc_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    writes = _writes(client)
+    assert [w[2] for w in writes] == [0xB2, 0xB3, 0xB8, 0xB7]
+    # each carries an incrementing sequence byte and a valid checksum
+    from renpho_escs20m.x55aa.protocol import checksum
+
+    assert [w[5] for w in writes] == [0, 1, 2, 3]
+    for w in writes:
+        assert checksum(w[:-1]) == w[-1]
+
+
+@pytest.mark.asyncio
+async def test_msc_panel_delivers_weight_and_body_fat_once():
+    """A fragmented 0x25 panel fires exactly one callback carrying weight and
+    the scale's body fat (the caller derives the rest)."""
+    from renpho_escs20m.const import BODY_FAT_KEY
+
+    scale, callback = _make_msc_scale()
+    client = _make_client()
+    await _run_msc_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    _feed(scale, *(bytes.fromhex(f) for f in MSC_PANEL_FRAGMENTS))
+
+    assert callback.call_count == 1
+    data = callback.call_args.args[0]
+    assert data.measurements[WEIGHT_KEY] == 85.05
+    assert data.measurements[BODY_FAT_KEY] == 25.8
+    # No resistance for MSC (impedance block not attributed / not reported).
+    assert RESISTANCE_1_KEY not in data.measurements
+
+
+@pytest.mark.asyncio
+async def test_msc_duplicate_panel_is_ignored():
+    scale, callback = _make_msc_scale()
+    client = _make_client()
+    await _run_msc_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    frames = [bytes.fromhex(f) for f in MSC_PANEL_FRAGMENTS]
+    _feed(scale, *frames)
+    _feed(scale, *frames)
+    assert callback.call_count == 1

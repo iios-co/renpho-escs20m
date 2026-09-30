@@ -215,6 +215,24 @@ def has_obfuscated_resistance(
     )
 
 
+# MSC-flavor units (R-MSC04) identified by MAC prefix. The advertised model
+# identifier lives in the scan response, which a passive scanner never
+# relays, so — as with the obfuscated-resistance and metrics-panel registries
+# — an address prefix is the only signal available at detect time. Honoured
+# alongside any model id captured later (see KNOWN_MSC_MODEL_IDS).
+_MSC_ADDRESSES: tuple[str, ...] = ("60:30:F2:*",)  # R-MSC04 OUI
+
+
+def is_msc_address(address: str | None) -> bool:
+    """Return True if ``address`` matches a known MSC-flavor MAC prefix."""
+    if not address:
+        return False
+    lowered = address.lower()
+    return any(
+        fnmatch.fnmatch(lowered, pattern.lower()) for pattern in _MSC_ADDRESSES
+    )
+
+
 # Models that compute the full body-composition panel on-device and stream
 # it in extra frames right after each final measurement. For these the
 # final reading is held briefly and delivered once, merged with the panel
@@ -269,6 +287,13 @@ def detect_protocol(
         if payload is not None and is_x55aa_frame(payload, address):
             model_id = _parse_x55aa_model_id(payload)
             if model_id in X55AA_KNOWN_MODEL_IDS:
+                return ScaleProtocol.X55AA
+            # MSC-flavor units (R-MSC04) advertise a 0x55aa frame but their
+            # model id lives in the scan response, which a passive scanner
+            # never relays — so classify them by MAC prefix instead. Only
+            # applies when the model id is absent/unknown: a known id above
+            # already wins.
+            if is_msc_address(address):
                 return ScaleProtocol.X55AA
             # A 0x55aa-family unit whose model id has never been captured.
             # Deliberately unclassified: connecting would hold the scale's

@@ -22,7 +22,9 @@ from renpho_escs20m.x55aa.protocol import (
     CMD_MSC_FINAL,
     CMD_MSC_PANEL,
     Frame,
+    MSC_PROFILE_RMSC04_RAY,
     MSCMeasurement,
+    build_msc_handshake,
     checksum,
     iter_frames,
     parse_msc_final_weight,
@@ -147,6 +149,37 @@ def test_parse_msc_panel_rejects_short_payload() -> None:
     assert parse_msc_panel(Frame(CMD_MSC_PANEL, b"\x00" * 20)) is None
 
 
+# --- profile handshake (verbatim capture replay) ---------------------------
+
+
+def test_build_msc_handshake_reproduces_capture() -> None:
+    """The builder must reproduce the four captured handshake frames exactly
+    (the capture session started at sequence 0x05)."""
+    frames = build_msc_handshake(MSC_PROFILE_RMSC04_RAY, first_sequence=0x05)
+    expected = [
+        "55aab200090502071c2139b90302fc",
+        "55aab3000b060701016abc6cea01e00029",
+        "55aab8000c07020123281e780000000000ae",
+        "55aab70009080200010003526179f9",
+    ]
+    assert [f.hex() for f in frames] == expected
+
+
+def test_build_msc_handshake_sequences_and_checksums() -> None:
+    """Sequence byte increments per frame; checksum holds over each frame."""
+    frames = build_msc_handshake(MSC_PROFILE_RMSC04_RAY, first_sequence=0x20)
+    for offset, frame in enumerate(frames):
+        assert frame[5] == 0x20 + offset  # seq at payload index 0 (frame byte 5)
+        assert checksum(frame[:-1]) == frame[-1]
+
+
+def test_build_msc_handshake_sequence_wraps() -> None:
+    frames = build_msc_handshake(MSC_PROFILE_RMSC04_RAY, first_sequence=0xFE)
+    assert [f[5] for f in frames] == [0xFE, 0xFF, 0x00, 0x01]
+    for frame in frames:
+        assert checksum(frame[:-1]) == frame[-1]
+
+
 def test_final_and_panel_weight_agree() -> None:
     """The 0x24 precursor and 0x25 panel report the same weigh-in weight
     (within the 0.10 kg the scale rounds its live-weight stream to)."""
@@ -157,3 +190,51 @@ def test_final_and_panel_weight_agree() -> None:
     panel = parse_msc_panel(iter_frames(_reassemble(*PANEL_VECTORS[0][0]))[0])
     assert final is not None and panel is not None
     assert abs(final - panel.weight_kg) < 0.5
+
+
+# --- write allow-list guard -------------------------------------------------
+
+
+def test_assert_allowed_write_accepts_the_replayed_handshake() -> None:
+    from renpho_escs20m.x55aa.protocol import assert_allowed_write
+
+    for frame in build_msc_handshake(MSC_PROFILE_RMSC04_RAY, first_sequence=0):
+        assert_allowed_write(frame)  # must not raise
+
+
+def test_assert_allowed_write_accepts_b2_with_a_different_weight() -> None:
+    """0xb2's weight field is the one the app varies; a different weight in
+    the otherwise-verbatim frame is allowed."""
+    import struct
+
+    from renpho_escs20m.x55aa.protocol import (
+        CMD_MSC_SET_HEIGHT_WEIGHT,
+        MSC_PROFILE_RMSC04_RAY,
+        assert_allowed_write,
+        checksum,
+    )
+
+    tail = bytearray(MSC_PROFILE_RMSC04_RAY.set_height_weight_tail)
+    struct.pack_into(">H", tail, 3, 9012)  # a different last weight (90.12 kg)
+    body = b"\x55\xaa" + bytes([CMD_MSC_SET_HEIGHT_WEIGHT])
+    body += (len(tail) + 1).to_bytes(2, "big") + bytes([0x05]) + bytes(tail)
+    frame = body + bytes([checksum(body)])
+    assert_allowed_write(frame)  # must not raise
+
+
+def test_assert_allowed_write_rejects_a_mutated_profile() -> None:
+    """A 0xb8 profile that differs from the captured template is refused: its
+    bytes are not understood, so the library must not send it."""
+    from renpho_escs20m.x55aa.protocol import (
+        CMD_MSC_PROFILE,
+        ForbiddenWrite,
+        assert_allowed_write,
+        checksum,
+    )
+
+    body = b"\x55\xaa" + bytes([CMD_MSC_PROFILE])
+    tampered = bytes.fromhex("020199281e780000000000")  # one byte changed
+    body += (len(tampered) + 1).to_bytes(2, "big") + bytes([0x05]) + tampered
+    frame = body + bytes([checksum(body)])
+    with pytest.raises(ForbiddenWrite):
+        assert_allowed_write(frame)

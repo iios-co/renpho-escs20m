@@ -574,6 +574,112 @@ def build_extended_stored_record_ack() -> bytes:
     return _build_frame(CMD_EXTENDED_STORED_RECORD_ACK, _STORED_RECORD_ACK_PAYLOAD)
 
 
+# --- MSC flavor (R-MSC04) profile handshake ---------------------------------
+#
+# The R-MSC04 releases no final measurement until the phone completes a
+# four-frame handshake (0xb2, 0xb3, 0xb8, 0xb7) over the command
+# characteristic. Every frame carries a per-session sequence byte at payload
+# index 0 (frame byte 5) that increments by one across the session, and the
+# usual trailing 8-bit-sum checksum.
+#
+# IMPORTANT (attribution status): the profile-bearing bytes below are NOT
+# fully decoded. They are reproduced verbatim from one unit's capture, where
+# they were byte-identical across four weigh-ins of a single user (only the
+# sequence byte, the 0xb2 weight field, and one varying field in 0xb3
+# changed). They therefore encode THAT user's profile (the one the official
+# app held) and no other. This builder is a capture replay for that single
+# profile, not a general profile encoder — it must not be presented as
+# multi-user support. A general encoder needs captures from several distinct
+# profiles to attribute sex / birth date / height, exactly as the extended
+# flavor's 0x96 was decoded. Until then callers pass the captured templates
+# explicitly and own the fact that they describe one specific person.
+#
+# Byte layout observed (payload = everything after the 5-byte header, before
+# the checksum; sequence byte is payload[0]):
+#   0xb2 (9):  seq · 02 07 1c · WEIGHT(uint16 BE ×100) · b9 03 02
+#              (07 1c = 0x071c = 182.0 cm ×10, this user's height)
+#   0xb3 (11): seq · 07 01 01 6a bc · VARY(2) · 01 e0 00
+#   0xb8 (12): seq · 02 01 23 28 1e 78 00 00 00 00 00   (the profile)
+#   0xb7 (9):  seq · 02 00 01 00 03 · <ascii label>     (52 61 79 = "Ray")
+
+CMD_MSC_SET_HEIGHT_WEIGHT = 0xB2
+CMD_MSC_CONFIG = 0xB3
+CMD_MSC_PROFILE = 0xB8
+CMD_MSC_LABEL = 0xB7
+
+MSC_HANDSHAKE_COMMANDS: tuple[int, ...] = (
+    CMD_MSC_SET_HEIGHT_WEIGHT,
+    CMD_MSC_CONFIG,
+    CMD_MSC_PROFILE,
+    CMD_MSC_LABEL,
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class MSCCapturedProfile:
+    """A single unit's captured MSC handshake, replayed verbatim.
+
+    Each field is the frame payload *after* the sequence byte and *before*
+    the checksum, exactly as captured. The builder re-stamps the sequence
+    byte and recomputes the checksum; nothing else is altered. These bytes
+    describe one specific person (the profile the official app held during
+    the capture) and are not a general profile encoding — see the module
+    note above.
+    """
+
+    set_height_weight_tail: bytes  # 0xb2 payload after seq, before checksum
+    config_tail: bytes  # 0xb3
+    profile_tail: bytes  # 0xb8
+    label_tail: bytes  # 0xb7
+
+
+# The capture from the R-MSC04 at 60:30:F2:73:CC:79 (user "Ray": male, DOB
+# 1976-12-07, height 182 cm). Replaying this drives that unit for that user;
+# it is the only MSC profile captured so far.
+MSC_PROFILE_RMSC04_RAY = MSCCapturedProfile(
+    set_height_weight_tail=bytes.fromhex("02071c2139b90302"),
+    config_tail=bytes.fromhex("0701016abc6cea01e000"),
+    profile_tail=bytes.fromhex("020123281e780000000000"),
+    label_tail=bytes.fromhex("0200010003526179"),
+)
+
+# The exact post-sequence payloads the write guard permits, per command. The
+# only captured MSC profile is the single source; a second profile would add
+# its tails here (and, more importantly, would let the bytes be decoded into
+# a real encoder rather than a replay). See assert_allowed_write.
+_MSC_ALLOWED_TAILS: dict[int, bytes] = {
+    CMD_MSC_SET_HEIGHT_WEIGHT: MSC_PROFILE_RMSC04_RAY.set_height_weight_tail,
+    CMD_MSC_CONFIG: MSC_PROFILE_RMSC04_RAY.config_tail,
+    CMD_MSC_PROFILE: MSC_PROFILE_RMSC04_RAY.profile_tail,
+    CMD_MSC_LABEL: MSC_PROFILE_RMSC04_RAY.label_tail,
+}
+
+
+def build_msc_handshake(
+    profile: MSCCapturedProfile, first_sequence: int = 0
+) -> list[bytes]:
+    """Return the four MSC handshake frames, sequence-stamped and checksummed.
+
+    ``first_sequence`` is the value stamped on the first frame (0xb2); the
+    next three increment by one. The client owns choosing the starting value
+    (the scale's expectation at connect is not yet verified — see the client).
+
+    The bytes are a verbatim replay of one captured profile; this function
+    only re-stamps the per-frame sequence byte and recomputes the checksum.
+    """
+    tails = (
+        (CMD_MSC_SET_HEIGHT_WEIGHT, profile.set_height_weight_tail),
+        (CMD_MSC_CONFIG, profile.config_tail),
+        (CMD_MSC_PROFILE, profile.profile_tail),
+        (CMD_MSC_LABEL, profile.label_tail),
+    )
+    frames: list[bytes] = []
+    for offset, (cmd, tail) in enumerate(tails):
+        seq = (first_sequence + offset) & 0xFF
+        frames.append(_build_frame(cmd, bytes([seq]) + tail))
+    return frames
+
+
 def build_set_time_command(unix_seconds: int, utc_offset_seconds: int) -> bytes:
     """``0x97`` sub-op 1: set the scale's clock.
 
@@ -651,8 +757,44 @@ def assert_allowed_write(frame: bytes) -> None:
             raise ForbiddenWrite(
                 f"0x{cmd:02x} must carry payload 01; no other ack form has been seen"
             )
+    elif cmd in MSC_HANDSHAKE_COMMANDS:
+        _assert_allowed_msc_write(cmd, payload)
     else:
         raise ForbiddenWrite(f"command 0x{cmd:02x} is not on this library's allow-list")
+
+
+def _assert_allowed_msc_write(cmd: int, payload: bytes) -> None:
+    """Permit only the verbatim MSC handshake this library replays.
+
+    The MSC handshake is not decoded; it is reproduced byte-for-byte from a
+    single capture. So the guard is deliberately strict: every byte after the
+    sequence byte must equal the captured template, except the 0xb2 weight
+    field (payload bytes 4:6), which the app varies with the user's last
+    weight. Anything else — a different profile, a mutated config — is
+    refused, because its meaning is unknown and this is the wrong place to
+    find out. This keeps the "never send a frame we can't account for"
+    guarantee intact even for the replay path.
+    """
+    known = _MSC_ALLOWED_TAILS.get(cmd)
+    if known is None:  # pragma: no cover - cmd already gated by the caller
+        raise ForbiddenWrite(f"0x{cmd:02x} is not a known MSC handshake command")
+    if len(payload) != len(known) + 1:  # +1 for the leading sequence byte
+        raise ForbiddenWrite(
+            f"0x{cmd:02x} MSC handshake has unexpected length {len(payload)}"
+        )
+    tail = payload[1:]  # drop the sequence byte
+    if cmd == CMD_MSC_SET_HEIGHT_WEIGHT:
+        # Weight field (tail bytes 3:5) is the one the app varies; the rest
+        # (height and the surrounding constants) must match the template.
+        if tail[:3] != known[:3] or tail[5:] != known[5:]:
+            raise ForbiddenWrite(
+                "0xb2 MSC handshake differs from the captured template outside "
+                "the weight field"
+            )
+    elif tail != known:
+        raise ForbiddenWrite(
+            f"0x{cmd:02x} MSC handshake differs from the captured template"
+        )
 
 
 def is_advertisement(payload: bytes, address: str | None = None) -> bool:
