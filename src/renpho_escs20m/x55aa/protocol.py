@@ -117,9 +117,23 @@ _MIN_ADV_LEN = ADV_MAC_SLICE.stop
 # Extended (on-device body composition on 0x18; takes a guest profile):
 # 0x0031 (49) is the ES-CS20M HVIN ESCS20MB2 / Elis 1 (three captured units);
 # 0x0030 (48) is a sibling revision seen on one unit with identical frames.
+#
+# MSC (on-device body composition on a 0x24 final + a fragmented 0x25 panel;
+# takes a profile via the 0xb2/0xb3/0xb8/0xb7 handshake): the R-MSC04 "Body
+# Composition Scale" (HVIN R-MSC04). Its advertisement model id has not been
+# captured through a passive scanner, so the flavor is also selected by MAC
+# OUI (see detection.py); the identifier below is provisional and adopted
+# only if a future capture confirms it.
 KNOWN_BASIC_MODEL_IDS: frozenset[int] = frozenset({0x0003})
 KNOWN_EXTENDED_MODEL_IDS: frozenset[int] = frozenset({0x0030, 0x0031})
-KNOWN_MODEL_IDS: frozenset[int] = KNOWN_BASIC_MODEL_IDS | KNOWN_EXTENDED_MODEL_IDS
+# Populated as MSC-flavor advertisement identifiers are captured; empty for
+# now because the only known unit is reached through a passive scanner that
+# never relays the scan-response model id. Flavor selection falls back to the
+# MAC OUI in that case.
+KNOWN_MSC_MODEL_IDS: frozenset[int] = frozenset()
+KNOWN_MODEL_IDS: frozenset[int] = (
+    KNOWN_BASIC_MODEL_IDS | KNOWN_EXTENDED_MODEL_IDS | KNOWN_MSC_MODEL_IDS
+)
 
 # What each identifier has been seen on — a description for bug reports, not
 # a marketed-model lookup (one identifier spans several product names).
@@ -139,6 +153,11 @@ SET_TIME_MODEL_IDS: frozenset[int] = frozenset({0x0030, 0x0031})
 def is_extended_model(model_id: int | None) -> bool:
     """True for advertised model ids known to speak the extended flavor."""
     return model_id in KNOWN_EXTENDED_MODEL_IDS
+
+
+def is_msc_model(model_id: int | None) -> bool:
+    """True for advertised model ids known to speak the MSC flavor."""
+    return model_id in KNOWN_MSC_MODEL_IDS
 
 
 # ---- guest profile (extended flavor) ----------------------------------------
@@ -244,6 +263,39 @@ CMD_PROFILE_ACK = 0x16  # ack of 0x96; payload differs per model, so it is not p
 CMD_SETTINGS_ACK = 0x17  # ack of 0x97
 CMD_EXTENDED_MEASUREMENT = 0x18
 CMD_EXTENDED_STORED_RECORD = 0x19
+
+# MSC flavor (R-MSC04) — READ PATH ONLY.
+#
+# The scale answers a profile handshake (phone commands 0xb2/0xb3/0xb8/0xb7,
+# not yet fully attributed and therefore NOT built or sent by this library)
+# with a session-status frame (0x20), streams live weight (0x21), then on a
+# settled weigh-in sends a final weight frame (0x24) followed by a fragmented
+# body-composition panel (0x25). These read frames are checksum-verified
+# against captures from one R-MSC04 unit (three weigh-ins at different
+# weights, cross-checked against the Renpho app's own CSV export).
+#
+# Frame ``0x24`` — final weight (6-byte payload)
+#     ``[0]`` status (0x01 final) · ``[1]`` 0x11 constant · ``[2:4]`` 0x0000 ·
+#     ``[4:6]`` weight, uint16 big-endian, 0.01 kg.
+#
+# Frame ``0x25`` — body-composition panel (36-byte payload, fragmented across
+# three notifications behind the shared 0xAD/0xAE/0xAF fragment headers):
+#     ``[4:6]``   weight, uint16 big-endian, 0.01 kg
+#     ``[5:27]``  raw bio-impedance / reactance block (varies per weigh-in;
+#                 exact field split not attributed — see the issue)
+#     ``[28:30]`` body fat percent, uint16 big-endian, ×10
+#     ``[30:32]`` BMI, uint16 big-endian, ×10
+#     ``[32:34]`` skeletal muscle percent, uint16 big-endian, ×10
+#     ``[35]``    visceral fat, uint8
+#     The remaining app-displayed metrics (fat mass, muscle mass, water %,
+#     protein, bone, BMR, metabolic age, WHR) are NOT on the wire — the
+#     Renpho app derives them from weight + the panel above. This library
+#     reports weight and body fat and lets the caller derive the rest, the
+#     same as every other 0x55aa flavor.
+CMD_MSC_WEIGHT = 0x21
+CMD_MSC_FINAL = 0x24
+CMD_MSC_PANEL = 0x25
+
 CMD_SET_DISPLAY_UNIT = 0x90
 # 0x95 — one ack clears the scale's entire offline store; opt-in only.
 # 0x96 — a registered slot persists a user on the scale; only the guest
@@ -274,6 +326,17 @@ _LEN_EXTENDED_MEASUREMENT = 13
 _MIN_LEN_STORED_RECORD = 10
 _LEN_EXTENDED_STORED_RECORD = 20
 _LEN_STATUS = 5
+
+# MSC flavor. The 0x24 final weight frame is a 6-byte payload; the 0x25 panel
+# is 36 bytes. Verified field offsets into the 0x25 payload:
+_LEN_MSC_FINAL = 6
+_MSC_FINAL_WEIGHT_SLICE = slice(4, 6)  # uint16 BE, 0.01 kg
+_LEN_MSC_PANEL = 36
+_MSC_PANEL_WEIGHT_SLICE = slice(4, 6)  # uint16 BE, 0.01 kg
+_MSC_PANEL_BODY_FAT_SLICE = slice(28, 30)  # uint16 BE, ×10 percent
+_MSC_PANEL_BMI_SLICE = slice(30, 32)  # uint16 BE, ×10
+_MSC_PANEL_SKELETAL_MUSCLE_SLICE = slice(32, 34)  # uint16 BE, ×10 percent
+_MSC_PANEL_VISCERAL_FAT_INDEX = 35  # uint8
 
 # A frame longer than one notification is split by the extended flavor into
 # chunks behind a 3-byte header. Captures show 0xAD on the first chunk and
@@ -362,6 +425,25 @@ class ExtendedMeasurement(NamedTuple):
     @property
     def zero_current(self) -> bool:
         return bool(self.status & STATUS_ZERO_CURRENT)
+
+
+class MSCMeasurement(NamedTuple):
+    """Decoded MSC-flavor final reading (``0x24`` weight + ``0x25`` panel).
+
+    The scale computes ``body_fat`` on-device from the profile it held at
+    commit time. Unlike the extended flavor's ``0x18``, the MSC panel is
+    only ever sent after a profile handshake the app performed, and the
+    R-MSC04 reproduces the app's displayed body fat exactly (verified
+    across three weigh-ins), so it is reported. ``bmi`` and
+    ``skeletal_muscle`` are the scale's own numbers too; ``visceral_fat``
+    is its unitless rating.
+    """
+
+    weight_kg: float
+    body_fat: float
+    bmi: float
+    skeletal_muscle: float
+    visceral_fat: int
 
 
 class StoredRecord(NamedTuple):
@@ -687,6 +769,47 @@ def parse_extended_measurement(frame: Frame) -> ExtendedMeasurement | None:
         slot=payload[2],
         bmi=round(int.from_bytes(payload[9:11], "big") / 10, 1),
         body_fat=round(int.from_bytes(payload[11:13], "big") / 10, 1),
+    )
+
+
+def parse_msc_final_weight(frame: Frame) -> float | None:
+    """Decode an MSC ``0x24`` final weight frame; ``None`` for anything else.
+
+    Payload: ``[0]`` status 0x01 · ``[1]`` 0x11 · ``[2:4]`` 0x0000 ·
+    ``[4:6]`` weight uint16 BE 0.01 kg. The full body-composition panel
+    arrives separately on ``0x25``; this frame is the weight-only precursor.
+    """
+    if frame.cmd != CMD_MSC_FINAL or len(frame.payload) < _LEN_MSC_FINAL:
+        return None
+    return round(
+        int.from_bytes(frame.payload[_MSC_FINAL_WEIGHT_SLICE], "big") / _WEIGHT_SCALE, 2
+    )
+
+
+def parse_msc_panel(frame: Frame) -> MSCMeasurement | None:
+    """Decode an MSC ``0x25`` body-composition panel; ``None`` otherwise.
+
+    Only the capture-verified fields are read (weight, body fat %, BMI,
+    skeletal muscle %, visceral fat); the impedance/reactance block at
+    ``[5:27]`` is left unparsed pending attribution. Values are the scale's
+    own on-device figures, computed from the profile the app put on the
+    scale before the weigh-in.
+    """
+    if frame.cmd != CMD_MSC_PANEL or len(frame.payload) < _LEN_MSC_PANEL:
+        return None
+    payload = frame.payload
+    return MSCMeasurement(
+        weight_kg=round(
+            int.from_bytes(payload[_MSC_PANEL_WEIGHT_SLICE], "big") / _WEIGHT_SCALE, 2
+        ),
+        body_fat=round(
+            int.from_bytes(payload[_MSC_PANEL_BODY_FAT_SLICE], "big") / 10, 1
+        ),
+        bmi=round(int.from_bytes(payload[_MSC_PANEL_BMI_SLICE], "big") / 10, 1),
+        skeletal_muscle=round(
+            int.from_bytes(payload[_MSC_PANEL_SKELETAL_MUSCLE_SLICE], "big") / 10, 1
+        ),
+        visceral_fat=payload[_MSC_PANEL_VISCERAL_FAT_INDEX],
     )
 
 
