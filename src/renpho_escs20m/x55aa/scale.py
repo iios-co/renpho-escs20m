@@ -36,6 +36,7 @@ from ..body_metrics import Sex
 from ..const import (
     BODY_FAT_KEY,
     IMPEDANCE_RAW_KEY,
+    RAW_PANEL_HEX_KEY,
     RESISTANCE_1_KEY,
     SCALE_BMI_KEY,
     SCALE_SKELETAL_MUSCLE_KEY,
@@ -819,6 +820,11 @@ class Renpho55AAScale(GattScale):
         self._final_measurement = (panel.weight_kg, 0)
         self._final_from_fallback = False
         measurements: dict[str, str | float | None] = {WEIGHT_KEY: panel.weight_kg}
+        # The entire panel payload, verbatim — always, even on a zeroed panel:
+        # a zeroed reading is itself useful diagnostic data (it records that
+        # the scale measured nothing this weigh-in), and it never loses a byte.
+        if panel.raw_panel_hex:
+            measurements[RAW_PANEL_HEX_KEY] = panel.raw_panel_hex
         if panel.has_body_composition:
             measurements[BODY_FAT_KEY] = panel.body_fat
             # The scale's own on-device figures, under distinct keys so they

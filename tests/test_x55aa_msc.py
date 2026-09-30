@@ -90,6 +90,7 @@ PANEL_VECTORS = [
             skeletal_muscle=42.2,
             visceral_fat=8,
             impedance_raw=(3577, 3530, 2920, 3053, 3221, 3153, 2601, 2734),
+            raw_panel_hex="0411000021390a00a50df90dca0b680bed00630c950c510a290aae020102010101a60008",
         ),
     ),
     (
@@ -105,6 +106,7 @@ PANEL_VECTORS = [
             skeletal_muscle=41.3,
             visceral_fat=9,
             impedance_raw=(3628, 3556, 2910, 3020, 3249, 3162, 2602, 2721),
+            raw_panel_hex="0411000021b60a00aa0e2c0de40b5e0bcc00680cb10c5a0a2a0aa10201130105019d0009",
         ),
     ),
     (
@@ -120,6 +122,7 @@ PANEL_VECTORS = [
             skeletal_muscle=40.4,
             visceral_fat=10,
             impedance_raw=(3622, 3575, 2876, 2981, 3225, 3170, 2579, 2697),
+            raw_panel_hex="04110000225b0a00ad0e260df70b3c0ba500750c990c620a130a89020122010a0194000a",
         ),
     ),
 ]

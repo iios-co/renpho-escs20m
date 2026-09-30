@@ -67,6 +67,10 @@ SCALE_BMI_KEY = "scale_bmi"
 SCALE_SKELETAL_MUSCLE_KEY = "scale_skeletal_muscle"
 SCALE_VISCERAL_FAT_KEY = "scale_visceral_fat"
 IMPEDANCE_RAW_KEY = "impedance_raw"
+# The entire 0x25 panel payload as hex — every byte the scale sent, including
+# any not yet attributed to a field. Diagnostic, so no transmitted data is
+# ever lost and future decoding has ground truth.
+RAW_PANEL_HEX_KEY = "raw_panel_hex"
 
 __all__ = [
     "NOTIFY_CHARACTERISTIC_UUID",
@@ -101,4 +105,5 @@ __all__ = [
     "SCALE_SKELETAL_MUSCLE_KEY",
     "SCALE_VISCERAL_FAT_KEY",
     "IMPEDANCE_RAW_KEY",
+    "RAW_PANEL_HEX_KEY",
 ]

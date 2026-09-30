@@ -799,3 +799,32 @@ async def test_msc_zero_panel_omits_scale_metrics_and_impedance():
         IMPEDANCE_RAW_KEY,
     ):
         assert key not in m
+
+
+@pytest.mark.asyncio
+async def test_msc_raw_panel_hex_always_delivered():
+    """The full panel payload is delivered verbatim on every panel — even a
+    zeroed one — so no transmitted byte is ever lost."""
+    from renpho_escs20m.const import RAW_PANEL_HEX_KEY
+
+    # Good reading.
+    scale, callback = _make_msc_scale()
+    client = _make_msc_client()
+    await _run_msc_session_setup(scale, client)
+    await asyncio.sleep(0)
+    _feed(scale, *(bytes.fromhex(f) for f in MSC_PANEL_FRAGMENTS))
+    good = callback.call_args.args[0].measurements
+    assert good[RAW_PANEL_HEX_KEY] == (
+        "0411000021390a00a50df90dca0b680bed00630c950c510a290aae020102010101a60008"
+    )
+
+    # Zeroed reading still carries the raw hex (records that the scale
+    # measured nothing this weigh-in).
+    scale2, callback2 = _make_msc_scale()
+    client2 = _make_msc_client()
+    await _run_msc_session_setup(scale2, client2)
+    await asyncio.sleep(0)
+    _feed(scale2, *(bytes.fromhex(f) for f in MSC_PANEL_ZERO_FRAGMENTS))
+    zero = callback2.call_args.args[0].measurements
+    assert RAW_PANEL_HEX_KEY in zero
+    assert zero[RAW_PANEL_HEX_KEY].startswith("0411000021390a0000000000")

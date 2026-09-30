@@ -482,6 +482,12 @@ class MSCMeasurement(NamedTuple):
     ``_MSC_PANEL_IMPEDANCE_OFFSETS``); their exact frequency/segment meaning
     is unattributed, so they are carried for diagnostics, not interpreted.
 
+    ``raw_panel_hex`` is the ENTIRE 0x25 payload as hex — every byte the
+    scale sent, including the ones not yet attributed to a field — so no
+    transmitted data is ever discarded. It is the ground truth for any
+    future decoding (e.g. the +8/+18 values that vary with body state but
+    whose meaning is unconfirmed).
+
     When the scale could not measure body composition for a weigh-in it sends
     the panel with the whole block zeroed: ``body_fat``/``bmi``/
     ``skeletal_muscle``/``visceral_fat`` are then 0 and ``impedance_raw`` is
@@ -494,6 +500,7 @@ class MSCMeasurement(NamedTuple):
     skeletal_muscle: float
     visceral_fat: int
     impedance_raw: tuple[int, ...] = ()
+    raw_panel_hex: str = ""
 
     @property
     def has_body_composition(self) -> bool:
@@ -1038,6 +1045,7 @@ def parse_msc_panel(frame: Frame) -> MSCMeasurement | None:
             int.from_bytes(payload[off : off + 2], "big")
             for off in _MSC_PANEL_IMPEDANCE_OFFSETS
         ),
+        raw_panel_hex=payload.hex(),
     )
 
 
