@@ -710,3 +710,32 @@ async def test_msc_housekeeping_frames_are_recognized_not_unrecognized(caplog):
     assert "unrecognized" not in caplog.text
     assert "housekeeping" in caplog.text
     assert callback.call_count == 0
+
+
+# The all-zero-composition panel from a weigh-in where the scale computed
+# nothing (real capture, 85.05 kg; body fat / muscle / visceral all zero).
+MSC_PANEL_ZERO_FRAGMENTS = (
+    "ad040255aa2500240411000021390a0000000000",
+    "ae04010000000000000000000000000000000200",
+    "af040000010100000000c5",
+)
+
+
+@pytest.mark.asyncio
+async def test_msc_panel_with_zero_body_fat_reports_weight_only():
+    """When the scale computes no body composition it sends the panel with
+    the whole block zeroed. A literal 0.0% body fat must NOT be reported (it
+    would drive fat-free mass to equal weight downstream) — weight only."""
+    from renpho_escs20m.const import BODY_FAT_KEY
+
+    scale, callback = _make_msc_scale()
+    client = _make_msc_client()
+    await _run_msc_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    _feed(scale, *(bytes.fromhex(f) for f in MSC_PANEL_ZERO_FRAGMENTS))
+
+    assert callback.call_count == 1
+    data = callback.call_args.args[0]
+    assert data.measurements[WEIGHT_KEY] == 85.05
+    assert BODY_FAT_KEY not in data.measurements

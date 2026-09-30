@@ -788,11 +788,18 @@ class Renpho55AAScale(GattScale):
     def _handle_msc_panel(self, frame: Frame, name: str | None, address: str) -> None:
         """Deliver the MSC body-composition panel (0x25) as one reading.
 
-        Reports weight and the scale's own body fat %; the caller derives the
-        remaining metrics from those, as with every other 0x55aa flavor. The
-        panel's BMI, skeletal muscle % and visceral fat are parsed and logged
-        but not reported, matching how the library treats other scales' own
-        derived numbers (the caller's BodyMetrics is the single source).
+        Reports weight, and the scale's own body fat % only when the scale
+        actually computed it. The scale runs its body-composition maths against
+        the profile it held when the measurement committed; when it produces
+        nothing (no usable impedance/profile pairing in the weigh-in window) it
+        sends the panel with the whole body-composition block zeroed — weight
+        and BMI populated, everything else 0. A literal 0.0 % body fat is not a
+        real reading: reporting it would drive fat-free mass to equal total
+        weight downstream. So a zero body fat is treated as absent and only the
+        weight is delivered, exactly as the basic/extended flavors treat a
+        zero-resistance or profile-less final. The panel's BMI, skeletal muscle
+        % and visceral fat are parsed and logged but not reported; the caller's
+        BodyMetrics is the single source for derived metrics.
         """
         panel = parse_msc_panel(frame)
         if panel is None:
@@ -807,10 +814,15 @@ class Renpho55AAScale(GattScale):
         self._final_fired = True
         self._final_measurement = (panel.weight_kg, 0)
         self._final_from_fallback = False
-        measurements: dict[str, str | float | None] = {
-            WEIGHT_KEY: panel.weight_kg,
-            BODY_FAT_KEY: panel.body_fat,
-        }
+        measurements: dict[str, str | float | None] = {WEIGHT_KEY: panel.weight_kg}
+        if panel.body_fat > 0:
+            measurements[BODY_FAT_KEY] = panel.body_fat
+        else:
+            self._logger.debug(
+                "0x55aa (MSC) panel from %s carried no body composition "
+                "(scale computed none this weigh-in); reporting weight only",
+                address,
+            )
         self._logger.debug(
             "0x55aa (MSC) panel from %s: weight=%.2f kg, body_fat=%.1f%% "
             "(scale-derived bmi=%.1f, skeletal_muscle=%.1f%%, visceral=%d). "
