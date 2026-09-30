@@ -35,7 +35,11 @@ from bleak.backends.scanner import AdvertisementData, BaseBleakScanner
 from ..body_metrics import Sex
 from ..const import (
     BODY_FAT_KEY,
+    IMPEDANCE_RAW_KEY,
     RESISTANCE_1_KEY,
+    SCALE_BMI_KEY,
+    SCALE_SKELETAL_MUSCLE_KEY,
+    SCALE_VISCERAL_FAT_KEY,
     WEIGHT_KEY,
     X55AA_COMMAND_CHARACTERISTIC_UUID,
     X55AA_INDICATE_CHARACTERISTIC_UUID,
@@ -788,18 +792,18 @@ class Renpho55AAScale(GattScale):
     def _handle_msc_panel(self, frame: Frame, name: str | None, address: str) -> None:
         """Deliver the MSC body-composition panel (0x25) as one reading.
 
-        Reports weight, and the scale's own body fat % only when the scale
-        actually computed it. The scale runs its body-composition maths against
-        the profile it held when the measurement committed; when it produces
-        nothing (no usable impedance/profile pairing in the weigh-in window) it
-        sends the panel with the whole body-composition block zeroed — weight
-        and BMI populated, everything else 0. A literal 0.0 % body fat is not a
-        real reading: reporting it would drive fat-free mass to equal total
-        weight downstream. So a zero body fat is treated as absent and only the
-        weight is delivered, exactly as the basic/extended flavors treat a
-        zero-resistance or profile-less final. The panel's BMI, skeletal muscle
-        % and visceral fat are parsed and logged but not reported; the caller's
-        BodyMetrics is the single source for derived metrics.
+        Always reports weight. When the scale actually computed body
+        composition (``has_body_composition``), also reports its on-device
+        body fat (BODY_FAT_KEY, the input the caller's BodyMetrics computes
+        the rest from) plus the scale's OWN figures under distinct
+        ``scale_*`` keys (BMI, skeletal muscle %, visceral fat) and the raw
+        impedance samples — so a consumer can show the device's numbers next
+        to its own computed ones and compare. When the scale computed nothing
+        (no usable impedance/profile pairing in the weigh-in window) it sends
+        the panel with the whole block zeroed; a literal 0.0 body fat is that
+        sentinel, not a reading, so only the weight is delivered — exactly as
+        the basic/extended flavors treat a zero-resistance or profile-less
+        final.
         """
         panel = parse_msc_panel(frame)
         if panel is None:
@@ -815,8 +819,21 @@ class Renpho55AAScale(GattScale):
         self._final_measurement = (panel.weight_kg, 0)
         self._final_from_fallback = False
         measurements: dict[str, str | float | None] = {WEIGHT_KEY: panel.weight_kg}
-        if panel.body_fat > 0:
+        if panel.has_body_composition:
             measurements[BODY_FAT_KEY] = panel.body_fat
+            # The scale's own on-device figures, under distinct keys so they
+            # sit alongside the caller's computed values rather than replacing
+            # them. Reported only when the scale actually measured (a zeroed
+            # panel would otherwise publish misleading 0s).
+            measurements[SCALE_BMI_KEY] = panel.bmi
+            measurements[SCALE_SKELETAL_MUSCLE_KEY] = panel.skeletal_muscle
+            measurements[SCALE_VISCERAL_FAT_KEY] = panel.visceral_fat
+            if any(panel.impedance_raw):
+                # Verbatim samples; join as a compact string so it survives as
+                # a single measurement value (units/segments unattributed).
+                measurements[IMPEDANCE_RAW_KEY] = ",".join(
+                    str(v) for v in panel.impedance_raw
+                )
         else:
             self._logger.debug(
                 "0x55aa (MSC) panel from %s carried no body composition "
@@ -825,14 +842,15 @@ class Renpho55AAScale(GattScale):
             )
         self._logger.debug(
             "0x55aa (MSC) panel from %s: weight=%.2f kg, body_fat=%.1f%% "
-            "(scale-derived bmi=%.1f, skeletal_muscle=%.1f%%, visceral=%d). "
-            "Firing callback.",
+            "(scale bmi=%.1f, skeletal_muscle=%.1f%%, visceral=%d, "
+            "impedance=%s). Firing callback.",
             address,
             panel.weight_kg,
             panel.body_fat,
             panel.bmi,
             panel.skeletal_muscle,
             panel.visceral_fat,
+            panel.impedance_raw,
         )
         self._notification_callback(
             ScaleData(

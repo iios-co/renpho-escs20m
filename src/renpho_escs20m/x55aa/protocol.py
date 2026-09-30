@@ -285,19 +285,30 @@ CMD_EXTENDED_STORED_RECORD = 0x19
 #     ``[4:6]`` weight, uint16 big-endian, 0.01 kg.
 #
 # Frame ``0x25`` — body-composition panel (36-byte payload, fragmented across
-# three notifications behind the shared 0xAD/0xAE/0xAF fragment headers):
+# three notifications behind the shared 0xAD/0xAE/0xAF fragment headers).
+# Offsets are payload-relative (after the 5-byte header); all the labelled
+# fields are checksum-verified and cross-checked against the Renpho app's CSV
+# across three weigh-ins:
 #     ``[4:6]``   weight, uint16 big-endian, 0.01 kg
-#     ``[5:27]``  raw bio-impedance / reactance block (varies per weigh-in;
-#                 exact field split not attributed — see the issue)
+#     ``[7:27]``  raw bio-impedance block: a run of uint16 big-endian values
+#                 at odd offsets (+9, +11, +13, +15, +19, +21, +23, +25),
+#                 each ~2500-3600 on the captured unit and varying with body
+#                 state. These are the scale's raw impedance/reactance
+#                 samples (multiple frequencies or body segments). Which slot
+#                 is the whole-body resistance is NOT firmly attributed:
+#                 feeding any of them to calculate_body_fat() does not
+#                 reproduce the scale's own body fat, because that function
+#                 implements the QN algorithm, not this model's. So the block
+#                 is exposed verbatim (impedance_raw) for diagnostics and
+#                 future decoding, and the scale's on-device body fat is
+#                 reported as-is rather than recomputed.
 #     ``[28:30]`` body fat percent, uint16 big-endian, ×10
 #     ``[30:32]`` BMI, uint16 big-endian, ×10
 #     ``[32:34]`` skeletal muscle percent, uint16 big-endian, ×10
-#     ``[35]``    visceral fat, uint8
+#     ``[34]``    visceral fat, uint8
 #     The remaining app-displayed metrics (fat mass, muscle mass, water %,
 #     protein, bone, BMR, metabolic age, WHR) are NOT on the wire — the
-#     Renpho app derives them from weight + the panel above. This library
-#     reports weight and body fat and lets the caller derive the rest, the
-#     same as every other 0x55aa flavor.
+#     Renpho app derives them from weight + the fields above.
 CMD_MSC_WEIGHT = 0x21
 CMD_MSC_FINAL = 0x24
 CMD_MSC_PANEL = 0x25
@@ -365,6 +376,11 @@ _MSC_PANEL_BODY_FAT_SLICE = slice(28, 30)  # uint16 BE, ×10 percent
 _MSC_PANEL_BMI_SLICE = slice(30, 32)  # uint16 BE, ×10
 _MSC_PANEL_SKELETAL_MUSCLE_SLICE = slice(32, 34)  # uint16 BE, ×10 percent
 _MSC_PANEL_VISCERAL_FAT_INDEX = 35  # uint8
+# Raw bio-impedance samples: uint16 BE at these payload offsets. Verbatim
+# (no scaling) — their exact meaning (frequency/segment) is unattributed, so
+# they are surfaced for diagnostics rather than interpreted. The whole block
+# zeroes out on a weigh-in the scale couldn't measure (see the handler).
+_MSC_PANEL_IMPEDANCE_OFFSETS: tuple[int, ...] = (9, 11, 13, 15, 19, 21, 23, 25)
 
 # A frame longer than one notification is split by the extended flavor into
 # chunks behind a 3-byte header. Captures show 0xAD on the first chunk and
@@ -458,13 +474,18 @@ class ExtendedMeasurement(NamedTuple):
 class MSCMeasurement(NamedTuple):
     """Decoded MSC-flavor final reading (``0x24`` weight + ``0x25`` panel).
 
-    The scale computes ``body_fat`` on-device from the profile it held at
-    commit time. Unlike the extended flavor's ``0x18``, the MSC panel is
-    only ever sent after a profile handshake the app performed, and the
-    R-MSC04 reproduces the app's displayed body fat exactly (verified
-    across three weigh-ins), so it is reported. ``bmi`` and
-    ``skeletal_muscle`` are the scale's own numbers too; ``visceral_fat``
-    is its unitless rating.
+    All of ``body_fat``, ``bmi``, ``skeletal_muscle`` and ``visceral_fat``
+    are the scale's own on-device figures, computed from the profile it held
+    at commit time; the R-MSC04 reproduces the app's displayed values exactly
+    (verified across three weigh-ins). ``impedance_raw`` is the run of raw
+    bio-impedance samples from the panel (uint16 each, verbatim — see
+    ``_MSC_PANEL_IMPEDANCE_OFFSETS``); their exact frequency/segment meaning
+    is unattributed, so they are carried for diagnostics, not interpreted.
+
+    When the scale could not measure body composition for a weigh-in it sends
+    the panel with the whole block zeroed: ``body_fat``/``bmi``/
+    ``skeletal_muscle``/``visceral_fat`` are then 0 and ``impedance_raw`` is
+    all zeros. ``has_body_composition`` distinguishes that case.
     """
 
     weight_kg: float
@@ -472,6 +493,16 @@ class MSCMeasurement(NamedTuple):
     bmi: float
     skeletal_muscle: float
     visceral_fat: int
+    impedance_raw: tuple[int, ...] = ()
+
+    @property
+    def has_body_composition(self) -> bool:
+        """True when the scale actually computed body composition this weigh-in.
+
+        A literal 0.0 body fat is the scale's "no measurement" sentinel (the
+        panel's whole composition block is zeroed), not a real reading.
+        """
+        return self.body_fat > 0
 
 
 class StoredRecord(NamedTuple):
@@ -981,11 +1012,12 @@ def parse_msc_final_weight(frame: Frame) -> float | None:
 def parse_msc_panel(frame: Frame) -> MSCMeasurement | None:
     """Decode an MSC ``0x25`` body-composition panel; ``None`` otherwise.
 
-    Only the capture-verified fields are read (weight, body fat %, BMI,
-    skeletal muscle %, visceral fat); the impedance/reactance block at
-    ``[5:27]`` is left unparsed pending attribution. Values are the scale's
-    own on-device figures, computed from the profile the app put on the
-    scale before the weigh-in.
+    All capture-verified fields are read: weight, body fat %, BMI, skeletal
+    muscle %, visceral fat, and the raw bio-impedance block. The impedance
+    samples are returned verbatim (no scaling or interpretation) — their
+    frequency/segment meaning is unattributed. The body-composition figures
+    are the scale's own on-device values, computed from the profile the app
+    put on the scale before the weigh-in.
     """
     if frame.cmd != CMD_MSC_PANEL or len(frame.payload) < _LEN_MSC_PANEL:
         return None
@@ -1002,6 +1034,10 @@ def parse_msc_panel(frame: Frame) -> MSCMeasurement | None:
             int.from_bytes(payload[_MSC_PANEL_SKELETAL_MUSCLE_SLICE], "big") / 10, 1
         ),
         visceral_fat=payload[_MSC_PANEL_VISCERAL_FAT_INDEX],
+        impedance_raw=tuple(
+            int.from_bytes(payload[off : off + 2], "big")
+            for off in _MSC_PANEL_IMPEDANCE_OFFSETS
+        ),
     )
 
 

@@ -739,3 +739,63 @@ async def test_msc_panel_with_zero_body_fat_reports_weight_only():
     data = callback.call_args.args[0]
     assert data.measurements[WEIGHT_KEY] == 85.05
     assert BODY_FAT_KEY not in data.measurements
+
+
+@pytest.mark.asyncio
+async def test_msc_panel_delivers_scale_metrics_and_impedance():
+    """The panel reading carries the scale's own BMI / skeletal muscle /
+    visceral fat under scale_* keys (alongside body fat), plus the raw
+    impedance samples, so a consumer can compare them with its computed set."""
+    from renpho_escs20m.const import (
+        BODY_FAT_KEY,
+        IMPEDANCE_RAW_KEY,
+        SCALE_BMI_KEY,
+        SCALE_SKELETAL_MUSCLE_KEY,
+        SCALE_VISCERAL_FAT_KEY,
+    )
+
+    scale, callback = _make_msc_scale()
+    client = _make_msc_client()
+    await _run_msc_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    _feed(scale, *(bytes.fromhex(f) for f in MSC_PANEL_FRAGMENTS))
+
+    m = callback.call_args.args[0].measurements
+    assert m[WEIGHT_KEY] == 85.05
+    assert m[BODY_FAT_KEY] == 25.8
+    assert m[SCALE_BMI_KEY] == 25.7
+    assert m[SCALE_SKELETAL_MUSCLE_KEY] == 42.2
+    assert m[SCALE_VISCERAL_FAT_KEY] == 8
+    assert m[IMPEDANCE_RAW_KEY] == "3577,3530,2920,3053,3221,3153,2601,2734"
+
+
+@pytest.mark.asyncio
+async def test_msc_zero_panel_omits_scale_metrics_and_impedance():
+    """A zeroed panel (scale computed nothing) must not publish 0 for the
+    scale metrics or impedance — weight only."""
+    from renpho_escs20m.const import (
+        BODY_FAT_KEY,
+        IMPEDANCE_RAW_KEY,
+        SCALE_BMI_KEY,
+        SCALE_SKELETAL_MUSCLE_KEY,
+        SCALE_VISCERAL_FAT_KEY,
+    )
+
+    scale, callback = _make_msc_scale()
+    client = _make_msc_client()
+    await _run_msc_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    _feed(scale, *(bytes.fromhex(f) for f in MSC_PANEL_ZERO_FRAGMENTS))
+
+    m = callback.call_args.args[0].measurements
+    assert m[WEIGHT_KEY] == 85.05
+    for key in (
+        BODY_FAT_KEY,
+        SCALE_BMI_KEY,
+        SCALE_SKELETAL_MUSCLE_KEY,
+        SCALE_VISCERAL_FAT_KEY,
+        IMPEDANCE_RAW_KEY,
+    ):
+        assert key not in m

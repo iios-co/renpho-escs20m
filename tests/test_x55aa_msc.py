@@ -89,6 +89,7 @@ PANEL_VECTORS = [
             bmi=25.7,
             skeletal_muscle=42.2,
             visceral_fat=8,
+            impedance_raw=(3577, 3530, 2920, 3053, 3221, 3153, 2601, 2734),
         ),
     ),
     (
@@ -103,6 +104,7 @@ PANEL_VECTORS = [
             bmi=26.1,
             skeletal_muscle=41.3,
             visceral_fat=9,
+            impedance_raw=(3628, 3556, 2910, 3020, 3249, 3162, 2602, 2721),
         ),
     ),
     (
@@ -117,6 +119,7 @@ PANEL_VECTORS = [
             bmi=26.6,
             skeletal_muscle=40.4,
             visceral_fat=10,
+            impedance_raw=(3622, 3575, 2876, 2981, 3225, 3170, 2579, 2697),
         ),
     ),
 ]

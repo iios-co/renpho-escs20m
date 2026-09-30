@@ -56,6 +56,18 @@ SKELETAL_MUSCLE_KEY = "skeletal_muscle"
 BODY_SCORE_KEY = "body_score"
 BODY_SHAPE_KEY = "body_shape"
 
+# Scale-provided ("as measured by the device") metrics for the MSC flavor
+# (R-MSC04). Distinct from the keys above so a consumer can expose the scale's
+# own on-device figures ALONGSIDE its own computed ones and compare them,
+# rather than one overwriting the other. Body fat rides BODY_FAT_KEY as usual
+# (there is no computed-vs-scale ambiguity: the caller's computation takes the
+# scale's body fat as its input). ``impedance_raw`` is the verbatim tuple of
+# raw bio-impedance samples from the panel; units/segments unattributed.
+SCALE_BMI_KEY = "scale_bmi"
+SCALE_SKELETAL_MUSCLE_KEY = "scale_skeletal_muscle"
+SCALE_VISCERAL_FAT_KEY = "scale_visceral_fat"
+IMPEDANCE_RAW_KEY = "impedance_raw"
+
 __all__ = [
     "NOTIFY_CHARACTERISTIC_UUID",
     "COMMAND_CHARACTERISTIC_UUID",
@@ -85,4 +97,8 @@ __all__ = [
     "SKELETAL_MUSCLE_KEY",
     "BODY_SCORE_KEY",
     "BODY_SHAPE_KEY",
+    "SCALE_BMI_KEY",
+    "SCALE_SKELETAL_MUSCLE_KEY",
+    "SCALE_VISCERAL_FAT_KEY",
+    "IMPEDANCE_RAW_KEY",
 ]
